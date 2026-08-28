@@ -125,6 +125,8 @@ export interface MLCounterNarrativeGenerateResponse {
 
 export interface MLCounterNarrativeDeployPayload {
   approved_text: string;
+  external_id:   string | null;  // original platform post/tweet ID for reply posting
+  platform:      string | null;  // e.g. "twitter", "facebook" — drives platform dispatch
 }
 
 // ── Batch classify ────────────────────────────────────────────────────────────

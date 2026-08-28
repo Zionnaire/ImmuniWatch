@@ -618,22 +618,26 @@ export async function getCounterNarrativePending(): Promise<MLCounterNarrativeIt
 
 /**
  * Deploy an approved counter-narrative to the original platform via the ML service.
- * The ML service tags the original poster and posts the reply.
+ * Passes external_id (original tweet/post ID) and platform so the ML service can
+ * route to the correct dispatcher (e.g. twitter_dispatcher.post_twitter_reply).
  */
 export async function deployCounterNarrative(
   postId:       string,
   approvedText: string,
+  externalId:   string | null,
+  platform:     string | null,
 ): Promise<void> {
   if (config.mlService.mockMode) {
-    logger.info(`[mock] counter-narrative deployed for post=${postId}`);
+    logger.info(`[mock] counter-narrative deployed for post=${postId} platform=${platform}`);
     return;
   }
   try {
-    await http.post<void>(
-      `/counter-narrative/${postId}/deploy`,
-      { approved_text: approvedText } as MLCounterNarrativeDeployPayload,
-      { timeout: 15_000 },
-    );
+    const payload: MLCounterNarrativeDeployPayload = {
+      approved_text: approvedText,
+      external_id:   externalId,
+      platform,
+    };
+    await http.post<void>(`/counter-narrative/${postId}/deploy`, payload, { timeout: 15_000 });
   } catch (err) {
     // Treat any ML error as "endpoint not yet live" — the approved response
     // is already saved in MongoDB, so the action is not lost.

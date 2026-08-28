@@ -194,16 +194,24 @@ export async function deployCounterNarrative(req: Request, res: Response, next: 
       return res.status(400).json({ code: 'MISSING_TEXT', message: 'approvedText is required' });
     }
 
-    // Update the HITL review with the final approved response text
+    // Fetch post so we can pass the original tweet/post ID and platform to the ML dispatcher
+    const post = await Post.findById(postId).select('platform externalId').lean();
+
     await HITLReview.findOneAndUpdate(
       { postId },
       { $set: { approvedResponse: approvedText.trim() } },
     );
 
-    // Deploy to platform via ML service (gracefully no-ops if endpoint not yet live)
-    await mlClient.deployCounterNarrative(postId, approvedText.trim());
+    // Deploy to platform via ML service — passes external_id + platform so the
+    // ML service can call the correct platform dispatcher (e.g. Twitter reply).
+    await mlClient.deployCounterNarrative(
+      postId,
+      approvedText.trim(),
+      post?.externalId ?? null,
+      post?.platform   ?? null,
+    );
 
-    logger.info(`[counter-narrative] deployed post=${postId}`);
+    logger.info(`[counter-narrative] deployed post=${postId} platform=${post?.platform ?? 'unknown'}`);
     res.json({ success: true, postId, message: 'Counter-narrative deployed successfully' });
   } catch (err) { next(err); }
 }
