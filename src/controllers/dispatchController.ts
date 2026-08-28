@@ -212,7 +212,7 @@ export async function deployCounterNarrative(req: Request, res: Response, next: 
     );
 
     logger.info(`[counter-narrative] deployed post=${postId} platform=${post?.platform ?? 'unknown'}`);
-    res.json({ success: true, postId, message: 'Counter-narrative deployed successfully' });
+    res.json({ success: true, postId, platform: post?.platform ?? null, message: 'Counter-narrative deployed successfully' });
   } catch (err) { next(err); }
 }
 
