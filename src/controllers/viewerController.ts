@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { Post }           from '../models/Post';
 import { Classification } from '../models/Classification';
 import { HITLReview }     from '../models/HITLReview';
+import { Alert }          from '../models/Alert';
 import { HITLStatus, PostPlatform } from '../types';
 
 export async function verifySummary(_req: Request, res: Response, next: NextFunction) {
@@ -105,5 +106,67 @@ export async function getSummary(_req: Request, res: Response, next: NextFunctio
       recentPosts,
       connectors:  connectorData,
     });
+  } catch (err) { next(err); }
+}
+
+// ── GET /viewer/posts — paginated posts feed ──────────────────────────────────
+
+export async function getPosts(req: Request, res: Response, next: NextFunction) {
+  try {
+    const page  = Math.max(1, parseInt(req.query.page  as string) || 1);
+    const limit = Math.min(50, parseInt(req.query.limit as string) || 30);
+    const skip  = (page - 1) * limit;
+
+    const [total, posts] = await Promise.all([
+      Post.countDocuments(),
+      Post.aggregate([
+        { $sort: { ingestedAt: -1 } },
+        { $skip: skip },
+        { $limit: limit },
+        { $lookup: { from: 'classifications', localField: '_id', foreignField: 'postId', as: 'cls' } },
+        {
+          $project: {
+            content:    { $substrCP: ['$content', 0, 300] },
+            platform:   1,
+            language:   1,
+            ingestedAt: 1,
+            externalId: 1,
+            label:      { $ifNull: [{ $arrayElemAt: ['$cls.label', 0] }, 'pending'] },
+            confidence: { $ifNull: [{ $arrayElemAt: ['$cls.confidence', 0] }, 0] },
+          },
+        },
+      ]),
+    ]);
+
+    res.json({ total, page, limit, posts });
+  } catch (err) { next(err); }
+}
+
+// ── GET /viewer/queue — pending HITL items ────────────────────────────────────
+
+export async function getQueue(req: Request, res: Response, next: NextFunction) {
+  try {
+    const reviews = await HITLReview.find({ status: HITLStatus.PENDING })
+      .sort({ priority: -1, createdAt: 1 })
+      .limit(30)
+      .populate<{ postId: { content: string; platform: string; language: string; ingestedAt: Date } | null }>(
+        'postId', 'content platform language ingestedAt',
+      )
+      .lean();
+
+    res.json({ reviews });
+  } catch (err) { next(err); }
+}
+
+// ── GET /viewer/alerts — unresolved alerts ────────────────────────────────────
+
+export async function getAlerts(req: Request, res: Response, next: NextFunction) {
+  try {
+    const alerts = await Alert.find({ isResolved: false })
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .lean();
+
+    res.json({ alerts });
   } catch (err) { next(err); }
 }

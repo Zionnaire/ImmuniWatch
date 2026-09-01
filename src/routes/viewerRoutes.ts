@@ -8,5 +8,8 @@ router.use(viewerAuth);
 
 router.get('/verify',  viewer.verifySummary);
 router.get('/summary', viewer.getSummary);
+router.get('/posts',   viewer.getPosts);
+router.get('/queue',   viewer.getQueue);
+router.get('/alerts',  viewer.getAlerts);
 
 export default router;
