@@ -20,57 +20,46 @@ export async function getSummary(_req: Request, res: Response, next: NextFunctio
 
     // ── Aggregate stats ───────────────────────────────────────────────────────
 
-    const [
-      totalPosts,
-      todayPosts,
-      pendingReviews,
-      labelCounts,
-      platformCounts,
-      recentPosts,
-    ] = await Promise.all([
-      Post.countDocuments(),
-      Post.countDocuments({ ingestedAt: { $gte: todayStart } }),
-      HITLReview.countDocuments({ status: HITLStatus.PENDING }),
+    const totalPosts      = await Post.countDocuments();
+    const todayPosts      = await Post.countDocuments({ ingestedAt: { $gte: todayStart } });
+    const pendingReviews  = await HITLReview.countDocuments({ status: HITLStatus.PENDING });
 
-      Classification.aggregate([
-        { $group: { _id: '$label', count: { $sum: 1 } } },
-      ]),
+    const labelCounts = await Classification.aggregate<{ _id: string; count: number }>([
+      { $group: { _id: '$label', count: { $sum: 1 } } },
+    ]);
 
-      Post.aggregate([
-        { $group: { _id: '$platform', count: { $sum: 1 } } },
-        { $sort: { count: -1 as -1 } },
-      ]),
+    const platformCounts = await Post.aggregate<{ _id: string; count: number }>([
+      { $group: { _id: '$platform', count: { $sum: 1 } } },
+      { $sort: { count: -1 as 1 | -1 } },
+    ]);
 
-      Post.aggregate([
-        { $sort: { ingestedAt: -1 } },
-        { $limit: 30 },
-        {
-          $lookup: {
-            from: 'classifications', localField: '_id',
-            foreignField: 'postId', as: 'cls',
-          },
+    const recentPosts = await Post.aggregate([
+      { $sort: { ingestedAt: -1 } },
+      { $limit: 30 },
+      {
+        $lookup: {
+          from: 'classifications', localField: '_id',
+          foreignField: 'postId', as: 'cls',
         },
-        {
-          $project: {
-            _id: 0,
-            content:    { $substr: ['$content', 0, 200] },
-            platform:   1,
-            language:   1,
-            ingestedAt: 1,
-            label:      { $ifNull: [{ $arrayElemAt: ['$cls.label', 0] }, 'pending'] },
-            confidence: { $ifNull: [{ $arrayElemAt: ['$cls.confidence', 0] }, 0] },
-          },
+      },
+      {
+        $project: {
+          _id: 0,
+          content:    { $substrCP: ['$content', 0, 200] },
+          platform:   1,
+          language:   1,
+          ingestedAt: 1,
+          label:      { $ifNull: [{ $arrayElemAt: ['$cls.label', 0] }, 'pending'] },
+          confidence: { $ifNull: [{ $arrayElemAt: ['$cls.confidence', 0] }, 0] },
         },
-      ]),
+      },
     ]);
 
     // ── Misinformation rate ───────────────────────────────────────────────────
 
-    const totalClassified = (labelCounts as { _id: string; count: number }[])
-      .reduce((s, r) => s + r.count, 0);
-    const misinfoCount = (labelCounts as { _id: string; count: number }[])
-      .find((r) => r._id === 'misinformation')?.count ?? 0;
-    const misinfoRate = totalClassified > 0
+    const totalClassified = labelCounts.reduce((s, r) => s + r.count, 0);
+    const misinfoCount    = labelCounts.find((r) => r._id === 'misinformation')?.count ?? 0;
+    const misinfoRate     = totalClassified > 0
       ? Math.round((misinfoCount / totalClassified) * 1000) / 10
       : 0;
 
@@ -87,42 +76,34 @@ export async function getSummary(_req: Request, res: Response, next: NextFunctio
       return anyEver ? 'degraded' : 'waiting';
     };
 
-    const last = (platform: PostPlatform) =>
-      Post.findOne({ platform }).sort({ ingestedAt: -1 }).select('ingestedAt').lean();
-
-    const epm = (platform: PostPlatform) =>
-      Post.countDocuments({ platform, ingestedAt: { $gte: oneMinAgo } });
-
-    const platforms: PostPlatform[] = [
+    const allPlatforms: PostPlatform[] = [
       PostPlatform.YOUTUBE, PostPlatform.BLUESKY, PostPlatform.TWITTER,
       PostPlatform.FACEBOOK, PostPlatform.INSTAGRAM, PostPlatform.SUBMISSION,
     ];
 
     const connectorData = await Promise.all(
-      platforms.map(async (p) => {
+      allPlatforms.map(async (p) => {
         const [status, lastDoc, eventsPerMin] = await Promise.all([
-          connectorStatus(p), last(p), epm(p),
+          connectorStatus(p),
+          Post.findOne({ platform: p }).sort({ ingestedAt: -1 }).select('ingestedAt').lean(),
+          Post.countDocuments({ platform: p, ingestedAt: { $gte: oneMinAgo } }),
         ]);
+        const lastAt = lastDoc?.ingestedAt;
         return {
           platform:     p,
           status,
           eventsPerMin,
-          lastEventAt:  lastDoc ? (lastDoc as { ingestedAt: Date }).ingestedAt.toISOString() : '',
+          lastEventAt:  lastAt instanceof Date ? lastAt.toISOString() : '',
         };
       }),
     );
 
     res.json({
-      stats: {
-        totalPosts,
-        todayPosts,
-        pendingReviews,
-        misinfoRate,
-      },
-      labels:    (labelCounts   as { _id: string; count: number }[]).map((r) => ({ label: r._id, count: r.count })),
-      platforms: (platformCounts as { _id: string; count: number }[]).map((r) => ({ platform: r._id, count: r.count })),
+      stats: { totalPosts, todayPosts, pendingReviews, misinfoRate },
+      labels:      labelCounts.map((r)    => ({ label: r._id, count: r.count })),
+      platforms:   platformCounts.map((r) => ({ platform: r._id, count: r.count })),
       recentPosts,
-      connectors: connectorData,
+      connectors:  connectorData,
     });
   } catch (err) { next(err); }
 }
