@@ -83,8 +83,8 @@ export async function getSummary(_req: Request, res: Response, next: NextFunctio
       if (inLastHour > 0) return 'active';
       const inLast2h = await Post.countDocuments({ platform, ingestedAt: { $gte: twoHrAgo } });
       if (inLast2h > 0) return 'degraded';
-      const anyEver = await Post.countDocuments({ platform }).limit(1);
-      return anyEver > 0 ? 'degraded' : 'waiting';
+      const anyEver = await Post.exists({ platform });
+      return anyEver ? 'degraded' : 'waiting';
     };
 
     const last = (platform: PostPlatform) =>
