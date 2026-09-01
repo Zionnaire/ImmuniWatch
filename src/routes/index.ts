@@ -15,6 +15,7 @@ import statsRoutes       from './statsRoutes';
 import submitRoutes      from './submitRoutes';
 import settingsRoutes      from './settingsRoutes';
 import organizationRoutes  from './organizationRoutes';
+import viewerRoutes        from './viewerRoutes';
 
 const router = Router();
 
@@ -31,6 +32,7 @@ router.use('/trends',       trendsRoutes);
 router.use('/dispatch',     dispatchRoutes);
 router.use('/stats',        statsRoutes);
 router.use('/submit',       submitRoutes);   // public — no authenticate middleware
+router.use('/viewer',       viewerRoutes);   // public — token-gated read-only view
 router.use('/settings',       settingsRoutes);
 router.use('/organizations',  organizationRoutes);
 

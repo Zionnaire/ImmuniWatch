@@ -87,6 +87,11 @@ const schema = z.object({
     apiKey: z.string().default(''),       // GROQ_API_KEY — set in .env to enable RAG
     model:  z.string().default('llama3-8b-8192'),
   }),
+
+  // VIEW_TOKEN — share /view/<token> with stakeholders for read-only access.
+  // Generate with: openssl rand -hex 32
+  // Leave empty to disable viewer access entirely.
+  viewToken: z.string().default(''),
 });
 
 const parsed = schema.safeParse({
@@ -152,6 +157,8 @@ const parsed = schema.safeParse({
     apiKey: process.env.GROQ_API_KEY || '',
     model:  process.env.GROQ_MODEL   || 'llama3-8b-8192',
   },
+
+  viewToken: process.env.VIEW_TOKEN || '',
 });
 
 if (!parsed.success) {
