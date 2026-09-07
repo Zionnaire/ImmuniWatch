@@ -24,13 +24,17 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
     if (req.method !== 'GET') {
       return next(new AppError(403, 'VIEWER_READ_ONLY', 'View-only access — no mutations allowed.'));
     }
-    const org = await Organization.findOne().select('_id').lean();
-    (req as AuthenticatedRequest).user = {
-      id:             'viewer-token',
-      role:           UserRole.ORG_ADMIN,
-      organizationId: org?._id?.toString() ?? null,
-    };
-    return next();
+    try {
+      const org = await Organization.findOne().select('_id').lean();
+      (req as AuthenticatedRequest).user = {
+        id:             'viewer-token',
+        role:           UserRole.ORG_ADMIN,
+        organizationId: org?._id?.toString() ?? null,
+      };
+      return next();
+    } catch (err) {
+      return next(err);
+    }
   }
 
   const token = extractToken(req);
