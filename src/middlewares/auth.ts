@@ -2,6 +2,8 @@ import { Request, Response, NextFunction } from 'express';
 import { verifyToken } from '../utils/jwt';
 import { AppError } from '../utils/AppError';
 import { AuthenticatedRequest, UserRole } from '../types';
+import { Organization } from '../models/Organization';
+import { config } from '../config';
 
 function extractToken(req: Request): string | null {
   // 1. HttpOnly cookie (browser clients)
@@ -12,7 +14,25 @@ function extractToken(req: Request): string | null {
   return null;
 }
 
-export function authenticate(req: Request, _res: Response, next: NextFunction): void {
+export async function authenticate(req: Request, _res: Response, next: NextFunction): Promise<void> {
+  // View-only token bypass — GET requests only
+  const viewToken = req.headers['x-view-token'] as string | undefined;
+  if (viewToken) {
+    if (!config.viewToken || viewToken !== config.viewToken) {
+      return next(new AppError(401, 'INVALID_VIEW_TOKEN', 'Invalid or missing view token.'));
+    }
+    if (req.method !== 'GET') {
+      return next(new AppError(403, 'VIEWER_READ_ONLY', 'View-only access — no mutations allowed.'));
+    }
+    const org = await Organization.findOne().select('_id').lean();
+    (req as AuthenticatedRequest).user = {
+      id:             'viewer-token',
+      role:           UserRole.ORG_ADMIN,
+      organizationId: org?._id?.toString() ?? null,
+    };
+    return next();
+  }
+
   const token = extractToken(req);
   if (!token) return next(new AppError(401, 'UNAUTHORIZED', 'No token provided'));
 
