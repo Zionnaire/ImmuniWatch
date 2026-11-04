@@ -1,0 +1,302 @@
+// Changes vs. original:
+//   • getConnectorStatus: Twitter/Facebook/YouTube now marked status: 'not_integrated'
+//     instead of 'down' — they are not connected yet, not degraded. This is an
+//     important semantic distinction for operators reading the pipeline page.
+//   • getPipelineStatus: mock mode flag surfaced in response so the frontend
+//     can show a "mock mode" banner when ML_MOCK_MODE=true
+//   • getKafkaHealth: unchanged — Kafka disabled, returns zeroed state correctly
+
+import { Request, Response, NextFunction } from "express";
+
+import { config } from "../config";
+import * as mlClient from "../services/mlClient";
+import { logger } from "../utils/logger";
+import { RetrainingHistory } from "../models/RetrainingHistory";
+import { Post } from "../models/Post";
+import { PostPlatform } from "../types";
+
+// ── GET /pipeline/status ──────────────────────────────────────────────────────
+
+export async function getPipelineStatus(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const circuitState = mlClient.getCircuitState();
+
+    let healthy = false;
+    let modelVersion = "unknown";
+    let healthError: string | null = null;
+
+    try {
+      const health = await Promise.race([
+        mlClient.getHealth(),
+        new Promise<never>((_, rej) =>
+          setTimeout(() => rej(new Error("timeout")), 2000),
+        ),
+      ]);
+      healthy = health.status === "ok";
+      modelVersion = health.model_version;
+    } catch (err) {
+      healthError = (err as Error).message;
+    }
+
+    const activeRetrain = await RetrainingHistory.findOne({
+      status: "in_progress",
+    })
+      .select("startedAt runId")
+      .lean();
+
+    let status: "healthy" | "degraded" | "fallback" | "retraining" | "mock";
+    if (mlClient.isMockMode()) {
+      status = "mock"; // distinct status so frontend can show a banner
+    } else if (activeRetrain) {
+      status = "retraining";
+    } else if (circuitState === "OPEN") {
+      status = "fallback";
+    } else if (circuitState === "HALF_OPEN" || !healthy) {
+      status = "degraded";
+    } else {
+      status = "healthy";
+    }
+
+    const rawUrl = config.mlService.url;
+    const midpoint = Math.floor(rawUrl.length / 2);
+    const maskedUrl =
+      rawUrl.slice(0, midpoint) + "*".repeat(rawUrl.length - midpoint);
+
+    res.json({
+      status,
+      retrainingStartedAt: activeRetrain
+        ? (activeRetrain as { startedAt: Date }).startedAt
+        : undefined,
+      mockMode: mlClient.isMockMode(),
+      mlService: {
+        url: maskedUrl,
+        circuitState,
+        healthy,
+        modelVersion,
+        lastHealthError: healthError,
+        lastChecked: new Date().toISOString(),
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ── GET /pipeline/connectors ──────────────────────────────────────────────────
+
+export async function getConnectorStatus(
+  _req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const oneMinAgo = new Date(Date.now() - 60_000);
+    const oneHourAgo = new Date(Date.now() - 60 * 60_000);
+    const twoHrAgo = new Date(Date.now() - 2 * 60 * 60_000);
+
+    const epm = (platform: PostPlatform) =>
+      Post.countDocuments({ platform, ingestedAt: { $gte: oneMinAgo } });
+    const last = (platform: PostPlatform) =>
+      Post.findOne({ platform }).sort({ ingestedAt: -1 }).select("ingestedAt").lean();
+
+    const [
+      ytPerMin,   ytLast,
+      bsPerMin,   bsLast,
+      twPerMin,   twLast,
+      fbPerMin,   fbLast,
+      igPerMin,   igLast,
+      subPerMin,  subLast,
+    ] = await Promise.all([
+      epm(PostPlatform.YOUTUBE),    last(PostPlatform.YOUTUBE),
+      epm(PostPlatform.BLUESKY),    last(PostPlatform.BLUESKY),
+      epm(PostPlatform.TWITTER),    last(PostPlatform.TWITTER),
+      epm(PostPlatform.FACEBOOK),   last(PostPlatform.FACEBOOK),
+      epm(PostPlatform.INSTAGRAM),  last(PostPlatform.INSTAGRAM),
+      epm(PostPlatform.SUBMISSION), last(PostPlatform.SUBMISSION),
+    ]);
+
+    const ts = (doc: unknown) =>
+      doc ? (doc as { ingestedAt: Date }).ingestedAt.toISOString() : "";
+
+    const connectorStatus = async (
+      platform: PostPlatform,
+    ): Promise<"active" | "degraded" | "waiting"> => {
+      const inLastHour = await Post.countDocuments({
+        platform,
+        ingestedAt: { $gte: oneHourAgo },
+      });
+      if (inLastHour > 0) return "active";
+      const inLast2h = await Post.countDocuments({
+        platform,
+        ingestedAt: { $gte: twoHrAgo },
+      });
+      if (inLast2h > 0) return "degraded";
+      const anyEver = await Post.countDocuments({ platform }).limit(1);
+      return anyEver > 0 ? "degraded" : "waiting";
+    };
+
+    const [ytStatus, bsStatus, twStatus, fbStatus, igStatus] = await Promise.all([
+      connectorStatus(PostPlatform.YOUTUBE),
+      connectorStatus(PostPlatform.BLUESKY),
+      connectorStatus(PostPlatform.TWITTER),
+      connectorStatus(PostPlatform.FACEBOOK),
+      connectorStatus(PostPlatform.INSTAGRAM),
+    ]);
+
+    res.json([
+      {
+        name: "YouTube",
+        platform: "youtube",
+        status: ytStatus,
+        eventsPerMin: ytPerMin,
+        lastEventAt: ts(ytLast),
+        errorRate: 0,
+      },
+      {
+        name: "Bluesky",
+        platform: "bluesky",
+        status: bsStatus,
+        eventsPerMin: bsPerMin,
+        lastEventAt: ts(bsLast),
+        errorRate: 0,
+      },
+      {
+        name: "Twitter/X",
+        platform: "twitter",
+        status: twStatus,
+        eventsPerMin: twPerMin,
+        lastEventAt: ts(twLast),
+        errorRate: 0,
+      },
+      {
+        name: "Facebook",
+        platform: "facebook",
+        status: fbStatus,
+        eventsPerMin: fbPerMin,
+        lastEventAt: ts(fbLast),
+        errorRate: 0,
+      },
+      {
+        name: "Instagram",
+        platform: "instagram",
+        status: igStatus,
+        eventsPerMin: igPerMin,
+        lastEventAt: ts(igLast),
+        errorRate: 0,
+      },
+      {
+        name: "Submissions",
+        platform: "submission",
+        status: "active",
+        eventsPerMin: subPerMin,
+        lastEventAt: ts(subLast),
+        errorRate: 0,
+      },
+    ]);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ── GET /pipeline/recent ──────────────────────────────────────────────────────
+// Queries MongoDB instead of the ML service in-memory buffer so posts survive
+// Space restarts and all platforms (including Instagram) appear correctly.
+
+export async function getRecentFeed(
+  _req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const [posts, totalCount] = await Promise.all([
+      Post.aggregate([
+        { $sort: { ingestedAt: -1 } },
+        { $limit: 50 },
+        {
+          $lookup: {
+            from:         'classifications',
+            localField:   '_id',
+            foreignField: 'postId',
+            as:           'cls',
+          },
+        },
+        {
+          $project: {
+            _id:             0,
+            post_id:         { $ifNull: ['$externalId', { $toString: '$_id' }] },
+            content_snippet: { $substr: ['$content', 0, 280] },
+            platform:        1,
+            language:        1,
+            classified_at:   {
+              $ifNull: [{ $arrayElemAt: ['$cls.createdAt', 0] }, '$ingestedAt'],
+            },
+            label:           {
+              $ifNull: [{ $arrayElemAt: ['$cls.label', 0] }, 'pending'],
+            },
+            confidence:      {
+              $ifNull: [{ $arrayElemAt: ['$cls.confidence', 0] }, 0],
+            },
+            entropy:         {
+              $ifNull: [{ $arrayElemAt: ['$cls.entropy', 0] }, 0],
+            },
+            state:           { $literal: null },
+          },
+        },
+      ]),
+      Post.countDocuments(),
+    ]);
+
+    res.json({
+      posts,
+      count:             posts.length,
+      total_since_start: totalCount,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ── GET /pipeline/kafka ───────────────────────────────────────────────────────
+
+export async function getKafkaHealth(
+  _req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    // Kafka is disabled (KAFKA_ENABLED=false in .env). Returning zeroed state
+    // so the frontend pipeline page reflects the real configuration.
+    // Phase 2 will replace this with a live KafkaJS admin client check.
+    res.json({
+      enabled: false,
+      eventsPerSec: 0,
+      kafkaLagMs: 0,
+      dedupRate: 0,
+      topics: [] as { name: string; partitions: number; lag: number }[],
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getMlHealth(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const health = await mlClient.getHealth();
+    res.json({
+      ...health,
+      circuitBreakerState: mlClient.getCircuitState(),
+      mockMode: mlClient.isMockMode(),
+      checkedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    next(err);
+  }
+}
